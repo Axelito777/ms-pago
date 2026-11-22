@@ -64,10 +64,28 @@ Un `userId` distinto al `oid` del token solo se acepta con rol **Admin** (si no,
 Lista de alertas (`cardHash`, `last4`, `userId`, `cantidadIntentos`, `fecha`, `motivo`). **Solo Admin**:
 sin token → 401, sin rol Admin → 403.
 
+## Seguridad (JWT de Azure Entra ID)
+El servicio valida el token por su cuenta, además del API Gateway (`config/SecurityConfig`):
+- **Firma** con las llaves públicas de Azure (JWKS; se descargan con el primer token, no al arrancar).
+- **Emisor** `https://login.microsoftonline.com/<tenant>/v2.0`, **audiencia** `api://<client-id>` o `<client-id>`
+  y **expiración** (60 s de tolerancia).
+- `scp` → `SCOPE_xxx`, `roles` → `ROLE_xxx`. Cualquier ruta no listada está denegada.
+- **401**: sin token o token inválido (firma, emisor, audiencia, expirado). **403**: token válido sin el scope.
+
+| Método | Ruta | Scope |
+|---|---|---|
+| POST | `/payments` | `payments.write` |
+| GET | `/payments` | `payments.read` |
+| GET | `/payments/{id}` | `payments.read` |
+| GET | `/payments/fraud-alerts` | `payments.read` |
+
+Las reglas de dueño y rol **Admin** (abajo) se aplican después, en `JwtClaims`, y no cambiaron.
+
 ## ¿Cómo se identifica al usuario?
-El API Gateway valida el JWT. Este servicio lee el payload a mano (`JwtClaims`, mismo enfoque que
+Con el token ya validado por `SecurityConfig`, este servicio lee el payload a mano (`JwtClaims`, mismo enfoque que
 `extraerClaim` de `OrderController`):
-- `oid` del token = usuario real. Si no hay token, se usa el `userId` del body o del query.
+- `oid` del token = usuario real. (La regla "sin token se usa el `userId` del body/query" sigue en `JwtClaims`,
+  pero por HTTP ya no se llega sin token: responde 401.)
 - `roles` debe contener `Admin` para ver alertas u operar con otro `userId`. Si `roles` no existe o no es
   una lista, se trata como vacío.
 
@@ -105,6 +123,8 @@ Evento publicado:
 ## Variables de entorno
 | Variable | Por defecto | Descripción |
 |---|---|---|
+| `AZURE_TENANT_ID` | tenant del proyecto | Tenant de Entra ID (emisor y JWKS) |
+| `AZURE_CLIENT_ID` | client ID de la API | Audiencia válida del token |
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Brokers Kafka |
 | `KAFKA_MAX_BLOCK_MS` | `3000` | Espera máxima al publicar |
 | `KAFKA_LISTENER_AUTO_STARTUP` | `true` | Arrancar el consumidor de auditoría |

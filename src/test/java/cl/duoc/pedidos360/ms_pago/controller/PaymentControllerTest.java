@@ -1,24 +1,29 @@
 package cl.duoc.pedidos360.ms_pago.controller;
 
+import cl.duoc.pedidos360.ms_pago.config.SecurityConfig;
 import cl.duoc.pedidos360.ms_pago.dto.PaymentRequest;
 import cl.duoc.pedidos360.ms_pago.dto.PaymentResponse;
 import cl.duoc.pedidos360.ms_pago.exception.ResourceNotFoundException;
 import cl.duoc.pedidos360.ms_pago.model.PaymentStatus;
 import cl.duoc.pedidos360.ms_pago.security.JwtClaims;
 import cl.duoc.pedidos360.ms_pago.service.PaymentService;
+import cl.duoc.pedidos360.ms_pago.support.TokenDePrueba;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.test.context.bean.override.convention.TestBean;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
-import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
@@ -36,7 +41,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 /** Capa web aislada: PaymentService mockeado, sin BD ni Kafka */
 @WebMvcTest(PaymentController.class)
-@Import(JwtClaims.class)
+@Import({JwtClaims.class, SecurityConfig.class})
 class PaymentControllerTest {
 
     private static final String TARJETA = "4111111111111111";
@@ -44,14 +49,28 @@ class PaymentControllerTest {
     @Autowired
     private MockMvc mockMvc;
 
+    /** Decoder con la llave RSA de prueba + validadores de producción (sin red) */
+    @TestBean
+    private JwtDecoder jwtDecoder;
+
+    static JwtDecoder jwtDecoder() {
+        return TokenDePrueba.decoder();
+    }
+
     @MockitoBean
     private PaymentService paymentService;
 
     // ------------------------------ helpers ------------------------------
 
+    /**
+     * Mismos claims de siempre, pero firmados con la llave RSA de prueba (SecurityConfig ahora valida la firma).
+     * Si el payload no trae scp se agrega "payments.read payments.write", el scope que exige el Gateway.
+     */
+    @SuppressWarnings("unchecked")
     private static String token(String payloadJson) {
-        Base64.Encoder enc = Base64.getUrlEncoder().withoutPadding();
-        return "Bearer eyJhbGciOiJub25lIn0." + enc.encodeToString(payloadJson.getBytes(StandardCharsets.UTF_8)) + ".firma";
+        Map<String, Object> claims = new HashMap<>(JsonMapper.builder().build().readValue(payloadJson, Map.class));
+        claims.putIfAbsent("scp", "payments.read payments.write");
+        return TokenDePrueba.bearer(claims);
     }
 
     private static final String TOKEN_USER = token("{\"oid\":\"oid-user\",\"roles\":[\"User\"]}");
@@ -107,19 +126,21 @@ class PaymentControllerTest {
                 .andExpect(jsonPath("$.fraudSuspected").value(true));
     }
 
+    /*
+     * Sin token ahora responde 401 (SecurityConfig). La regla de usar el userId del body/query
+     * cuando no hay token sigue en JwtClaims y se prueba en JwtClaimsTest.
+     */
     @Test
-    void sinToken_usaUserIdDelBody() throws Exception {
-        when(paymentService.procesar(any(), eq("user-body"))).thenReturn(respuesta(PaymentStatus.APPROVED, "user-body"));
-
+    void sinToken_conUserIdEnBody_401() throws Exception {
         mockMvc.perform(post("/payments").contentType(MediaType.APPLICATION_JSON).content(bodyValido("user-body")))
-                .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.userId").value("user-body"));
+                .andExpect(status().isUnauthorized());
+        verify(paymentService, never()).procesar(any(), any());
     }
 
     @Test
-    void sinTokenNiUserId_400() throws Exception {
+    void sinTokenNiUserId_401() throws Exception {
         mockMvc.perform(post("/payments").contentType(MediaType.APPLICATION_JSON).content(bodyValido(null)))
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isUnauthorized());
         verify(paymentService, never()).procesar(any(), any());
     }
 
@@ -178,8 +199,8 @@ class PaymentControllerTest {
     }
 
     @Test
-    void listarSinUserIdNiToken_400() throws Exception {
-        mockMvc.perform(get("/payments")).andExpect(status().isBadRequest());
+    void listarSinToken_401() throws Exception {
+        mockMvc.perform(get("/payments")).andExpect(status().isUnauthorized());
     }
 
     @Test
