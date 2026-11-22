@@ -2,6 +2,7 @@ package cl.duoc.pedidos360.ms_pago.service;
 
 import cl.duoc.pedidos360.ms_pago.event.PaymentAttemptEvent;
 import cl.duoc.pedidos360.ms_pago.model.PaymentAuditLog;
+import cl.duoc.pedidos360.ms_pago.model.PaymentMethod;
 import cl.duoc.pedidos360.ms_pago.model.PaymentStatus;
 import cl.duoc.pedidos360.ms_pago.repository.PaymentAuditLogRepository;
 import org.junit.jupiter.api.Test;
@@ -27,7 +28,7 @@ class PaymentAuditServiceTest {
     private PaymentAuditLogRepository repository;
 
     private final PaymentAttemptEvent evento = new PaymentAttemptEvent("e1", 1L, 10L, "user-1", "hash", "1111",
-            new BigDecimal("1000"), "CLP", PaymentStatus.BLOCKED_FRAUD, true, Instant.now());
+            new BigDecimal("1000"), "CLP", PaymentStatus.BLOCKED_FRAUD, true, Instant.now(), PaymentMethod.SIMULATED);
 
     @Test
     void guardaAuditoriaConParticionYOffset() {

@@ -3,6 +3,7 @@ package cl.duoc.pedidos360.ms_pago.service;
 import cl.duoc.pedidos360.ms_pago.config.KafkaTopics;
 import cl.duoc.pedidos360.ms_pago.event.PaymentAttemptEvent;
 import cl.duoc.pedidos360.ms_pago.event.PaymentEventPublisher;
+import cl.duoc.pedidos360.ms_pago.model.PaymentMethod;
 import cl.duoc.pedidos360.ms_pago.model.PaymentStatus;
 import org.apache.kafka.common.KafkaException;
 import org.junit.jupiter.api.Test;
@@ -35,7 +36,7 @@ class PaymentEventPublisherTest {
     private PaymentEventPublisher publisher;
 
     private final PaymentAttemptEvent evento = new PaymentAttemptEvent("e1", 1L, 10L, "user-1", "hash-abc", "1111",
-            new BigDecimal("1000"), "CLP", PaymentStatus.APPROVED, false, Instant.now());
+            new BigDecimal("1000"), "CLP", PaymentStatus.APPROVED, false, Instant.now(), PaymentMethod.SIMULATED);
 
     @Test
     void usaCardHashComoKey() {
@@ -44,6 +45,17 @@ class PaymentEventPublisherTest {
         publisher.publicar(evento);
 
         verify(kafkaTemplate).send(eq(KafkaTopics.PAYMENT_ATTEMPTS), eq("hash-abc"), eq(evento));
+    }
+
+    @Test
+    void webpay_usaUserIdComoKey() {
+        PaymentAttemptEvent webpay = new PaymentAttemptEvent("e2", 2L, 10L, "user-1", null, "6623",
+                new BigDecimal("1000"), "CLP", PaymentStatus.APPROVED, false, Instant.now(), PaymentMethod.WEBPAY);
+        when(kafkaTemplate.send(anyString(), anyString(), any())).thenReturn(new CompletableFuture<>());
+
+        publisher.publicar(webpay);
+
+        verify(kafkaTemplate).send(eq(KafkaTopics.PAYMENT_ATTEMPTS), eq("user-1"), eq(webpay));
     }
 
     @Test

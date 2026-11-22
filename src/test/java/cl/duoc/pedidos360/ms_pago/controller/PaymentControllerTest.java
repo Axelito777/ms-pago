@@ -4,6 +4,7 @@ import cl.duoc.pedidos360.ms_pago.config.SecurityConfig;
 import cl.duoc.pedidos360.ms_pago.dto.PaymentRequest;
 import cl.duoc.pedidos360.ms_pago.dto.PaymentResponse;
 import cl.duoc.pedidos360.ms_pago.exception.ResourceNotFoundException;
+import cl.duoc.pedidos360.ms_pago.model.PaymentMethod;
 import cl.duoc.pedidos360.ms_pago.model.PaymentStatus;
 import cl.duoc.pedidos360.ms_pago.security.JwtClaims;
 import cl.duoc.pedidos360.ms_pago.service.PaymentService;
@@ -90,7 +91,7 @@ class PaymentControllerTest {
 
     private static PaymentResponse respuesta(PaymentStatus status, String userId) {
         return new PaymentResponse(1L, 10L, userId, "1111", new BigDecimal("25990"), "CLP", status,
-                status == PaymentStatus.BLOCKED_FRAUD, "msg", LocalDateTime.now());
+                status == PaymentStatus.BLOCKED_FRAUD, "msg", LocalDateTime.now(), PaymentMethod.SIMULATED, null, null);
     }
 
     // ------------------------------ POST /payments ------------------------------

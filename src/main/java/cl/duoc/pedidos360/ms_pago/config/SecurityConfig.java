@@ -46,6 +46,14 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         // Dispatch interno de errores de Spring: sin esto un 500 llegaría como 401/403
                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
+                        // Retorno de Webpay PÚBLICO: es el navegador del usuario volviendo desde Transbank,
+                        // y esa redirección no lleva nuestro JWT. Es seguro porque solo sirve para confirmar
+                        // un token_ws que Transbank emitió para NUESTRO comercio: el commit se hace contra
+                        // Transbank con nuestra llave secreta (un token inventado falla) y cada token se
+                        // confirma una sola vez. Solo GET y POST de esta ruta exacta; todo lo demás exige token.
+                        .requestMatchers(HttpMethod.GET, "/payments/webpay/return").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/payments/webpay/return").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/payments/webpay/init").hasAuthority("SCOPE_payments.write")
                         .requestMatchers(HttpMethod.POST, "/payments").hasAuthority("SCOPE_payments.write")
                         .requestMatchers(HttpMethod.GET, "/payments").hasAuthority("SCOPE_payments.read")
                         .requestMatchers(HttpMethod.GET, "/payments/{id}").hasAuthority("SCOPE_payments.read")

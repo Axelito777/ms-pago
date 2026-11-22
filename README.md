@@ -4,6 +4,9 @@ Recibe intentos de pago, aplica un **antifraude por ventana deslizante** y publi
 (aprobado, rechazado o bloqueado) en el tópico Kafka `payment-attempts`. Un consumidor del mismo
 servicio (`payment-audit-group`) lee ese tópico y guarda una auditoría.
 
+Tiene **dos métodos de pago**: el **simulado** (`POST /payments`, con antifraude) y **Webpay Plus** de
+Transbank en ambiente de integración (ver [Webpay Plus](#webpay-plus)).
+
 ```
 POST /payments ─► validar body ─► userId (token/body) ─► cardHash + last4 ─► antifraude
                                                                            │
@@ -78,6 +81,8 @@ El servicio valida el token por su cuenta, además del API Gateway (`config/Secu
 | GET | `/payments` | `payments.read` |
 | GET | `/payments/{id}` | `payments.read` |
 | GET | `/payments/fraud-alerts` | `payments.read` |
+| POST | `/payments/webpay/init` | `payments.write` |
+| GET, POST | `/payments/webpay/return` | **público** (ver Webpay) |
 
 Las reglas de dueño y rol **Admin** (abajo) se aplican después, en `JwtClaims`, y no cambiaron.
 
@@ -102,12 +107,14 @@ comparte si hay varias instancias del servicio. En producción se usaría Redis 
 
 ## Pasarela
 `PaymentGateway` es una interfaz; hoy la implementa `SimulatedPaymentGateway` (rechaza si `last4` es
-`0000`). Para Webpay se agrega otra implementación sin tocar el resto.
+`0000`). Webpay no usa esta interfaz porque su flujo es distinto (el usuario sale de nuestra página):
+tiene su propio cliente, `WebpayClient`.
 
 ## Kafka
 - Tópico `payment-attempts` (lo crea `kafka-infra/create-topics.sh`; este servicio no crea tópicos).
-- **Key = cardHash**: los intentos de una misma tarjeta caen siempre en la misma partición, y Kafka
-  mantiene el orden dentro de cada partición.
+- **Key = cardHash** (pago simulado): los intentos de una misma tarjeta caen siempre en la misma partición,
+  y Kafka mantiene el orden dentro de cada partición.
+- **Key = userId** (Webpay): no conocemos la tarjeta, así que se ordena por usuario.
 - Productor: `acks=all`, idempotente, JSON sin headers de tipo, `max.block.ms` corto.
 - **Si Kafka está caído, el pago igual responde**: el error de publicación solo se loguea.
 - Consumidor `payment-audit-group`: `earliest`, `AckMode.RECORD`, `ErrorHandlingDeserializer`; tras 2
@@ -117,8 +124,81 @@ Evento publicado:
 ```json
 { "eventId": "uuid", "paymentId": 1, "orderId": 10, "userId": "oid", "cardHash": "9bbe...",
   "last4": "1111", "amount": 25990, "currency": "CLP", "status": "APPROVED",
-  "fraudSuspected": false, "timestamp": "2026-11-16T15:00:00Z" }
+  "fraudSuspected": false, "timestamp": "2026-11-16T15:00:00Z", "method": "SIMULATED" }
 ```
+En Webpay: `method = "WEBPAY"`, `cardHash = null`, y `status` puede ser `APPROVED`, `REJECTED` o `CANCELLED`.
+
+## Webpay Plus
+Webpay **saca al usuario de nuestra página**: la tarjeta se escribe en el sitio de Transbank, nunca aquí.
+El cliente (`HttpWebpayClient`) usa la API REST con `RestClient`, sin SDK.
+
+```
+Frontend ─POST /payments/webpay/init (JWT)─► ms-pago: Payment PENDING ─► Transbank: crear transacción
+   ◄────────────── 201 {paymentId, token, url, buyOrder} ───────────────────────┘
+Frontend ─form POST token_ws─► Webpay (el usuario paga con tarjeta de prueba)
+Webpay ─redirige al navegador─► GET|POST /payments/webpay/return (SIN JWT)
+   ms-pago: commit con Transbank ─► APPROVED / REJECTED  (o CANCELLED si anuló / se agotó el tiempo)
+   ─► Kafka payment-attempts ─► 302 a WEBPAY_FRONTEND_RESULT_URL?paymentId=<id>&status=<ESTADO>
+Frontend ─GET /payments/{id} (JWT)─► verifica el estado real y, si es APPROVED, crea la orden
+```
+
+### POST /payments/webpay/init
+```json
+{ "orderId": 55, "amount": 25990, "currency": "CLP" }
+```
+`orderId` es el `cartId` del frontend (igual que en el pago simulado). Mismas validaciones que `POST /payments`
+y además: solo `CLP` y montos **enteros** (Webpay no acepta decimales) → si no, 400.
+```json
+{ "paymentId": 7, "token": "01ab...", "url": "https://webpay3gint.transbank.cl/webpayserver/initTransaction",
+  "buyOrder": "P360-7-mhq3k2ab" }
+```
+**Respuestas:** `201` creado (`PENDING`) · `400` validación · `401`/`403` token/scope ·
+`502` Transbank falló o no respondió (el pago queda `REJECTED`) · `503` faltan variables `WEBPAY_*`.
+
+`buyOrder` = `"P360-" + paymentId + "-" + milisegundos en base 36`, recortado a 26 caracteres. Es único
+porque el `paymentId` es único (aunque el recorte se coma los milisegundos, el id siempre cabe entero).
+
+### GET|POST /payments/webpay/return (público)
+| Llega | Significa | Resultado |
+|---|---|---|
+| `token_ws` | pago terminado | commit: `APPROVED` si `response_code = 0`, `status = AUTHORIZED` **y** el monto coincide; si no, `REJECTED` |
+| `TBK_TOKEN` (+ `TBK_ORDEN_COMPRA`, `TBK_ID_SESION`) | el usuario anuló | `CANCELLED`, sin commit |
+| `token_ws` + `TBK_TOKEN` | error en el formulario de Webpay | `CANCELLED`, sin commit |
+| solo `TBK_ORDEN_COMPRA` + `TBK_ID_SESION` | se agotó el tiempo | `CANCELLED` |
+
+- Se acepta `TBK_ID_SESION` y `TBK_ID_SESSION`. Si la sesión no corresponde al dueño del pago, no se toca.
+- Si el pago **ya está en estado final** (por ejemplo, el usuario recargó la página), **no** se vuelve a
+  confirmar (Transbank rechaza un segundo commit): se redirige con el estado que ya tiene.
+- Si el commit falla por red, el pago queda `REJECTED` (sin commit, Transbank reversa la transacción sola).
+- Siempre responde **302** al frontend; si no se encuentra el pago → `status=UNKNOWN`.
+- Si falta `WEBPAY_FRONTEND_RESULT_URL` responde 503 **antes** de tocar el pago.
+
+**¿Por qué esta ruta es pública y es seguro?** La llama el navegador al volver de Transbank y esa
+redirección no lleva nuestro JWT. Solo sirve para confirmar un `token_ws` que Transbank emitió para
+nuestro comercio: el commit se hace contra Transbank con nuestra llave secreta (un token inventado no
+corresponde a ningún pago y no se confirma), y cada token se confirma una sola vez. El resto de las rutas
+sigue exigiendo JWT y scope.
+
+### Decisiones y limitaciones
+- **Sin antifraude por tarjeta en Webpay:** la tarjeta nunca pasa por nosotros (no hay `cardHash`).
+  El control de fraude de la tarjeta lo hace Transbank.
+- **Logs:** nunca se loguea el `token_ws` ni la llave, solo el `paymentId`. `webpayToken` y `apiKey`
+  están fuera del `toString()` (hay tests que lo verifican).
+- **Retornos simultáneos:** no hay bloqueo si dos retornos con el mismo token llegan exactamente a la vez;
+  en ese caso Transbank rechaza el segundo commit.
+- **Monto distinto:** si Transbank autoriza un monto distinto al del pago, queda `REJECTED` y se loguea una
+  advertencia (en un sistema real habría que anular la transacción en Transbank).
+
+### Probar con las tarjetas de prueba (integración)
+| Caso | Datos |
+|---|---|
+| Aprobada | VISA `4051 8856 0044 6623`, CVV `123`, cualquier fecha |
+| Rechazada | MASTERCARD `5186 0595 5959 0568`, CVV `123` |
+| Banco simulado | RUT `11.111.111-1`, clave `123` |
+
+Código de comercio de integración: `597055555532`. La llave de pruebas la publica Transbank en
+transbankdevelopers.cl ("Cómo empezar"); va solo en `WEBPAY_API_KEY`, nunca en el repo.
+Anular: en la pantalla de Webpay, botón "Anular compra y volver" → `CANCELLED`.
 
 ## Variables de entorno
 | Variable | Por defecto | Descripción |
@@ -133,21 +213,31 @@ Evento publicado:
 | `FRAUD_CLEANUP_INTERVAL_MS` | `60000` | Cada cuánto se limpia la memoria |
 | `DB_USERNAME` / `DB_PASSWORD` | `sa` / vacío | H2 |
 | `SPRING_PROFILES_ACTIVE` | — | `prod` en el servidor |
+| `WEBPAY_BASE_URL` | `https://webpay3gint.transbank.cl` | API de Transbank (integración) |
+| `WEBPAY_COMMERCE_CODE` | vacío | Código de comercio (`597055555532` en integración) |
+| `WEBPAY_API_KEY` | vacío | Llave secreta de Transbank. **Solo en `.env`** |
+| `WEBPAY_RETURN_URL` | vacío | URL pública (Gateway) de `/payments/webpay/return` |
+| `WEBPAY_FRONTEND_RESULT_URL` | vacío | Pantalla de resultado del frontend, ej. `https://front/#/pago/resultado` |
 
 ## Cómo probarlo
 ```bash
-mvn clean package          # 50 tests, sin broker (perfil test: listener apagado)
+mvn clean package          # 115 tests, sin broker ni Transbank (Webpay falso + MockRestServiceServer)
 docker build -t ms-pago .
 docker run -d --name ms-pago -p 8087:8087 --env-file .env ms-pago
 ```
-Demo de fraude (fish o bash), sin token y con `userId` en el body:
+Demo de fraude (fish o bash). Necesita un token de Azure con el scope `payments.write`; **sin token el
+servicio responde 401** (valida el JWT por su cuenta). El usuario sale del `oid` del token, así que el body
+no lleva `userId`:
 ```bash
+set TOKEN "pega-aqui-el-access-token"   # en bash: TOKEN="pega-aqui-el-access-token"
 for i in 1 2 3 4
   curl -s -o /dev/null -w "%{http_code}\n" -X POST localhost:8087/payments \
+    -H "Authorization: Bearer $TOKEN" \
     -H 'Content-Type: application/json' \
-    -d '{"orderId":1,"userId":"demo","cardNumber":"4111111111111111","cardHolder":"Demo","expiry":"12/30","cvv":"123","amount":1000}'
+    -d '{"orderId":1,"cardNumber":"4111111111111111","cardHolder":"Demo","expiry":"12/30","cvv":"123","amount":1000}'
 end
 # 201 201 201 429   (en bash: for i in 1 2 3 4; do ...; done)
+# Sin el header Authorization (o con un token vencido/inválido): 401 401 401 401
 ```
 Luego `GET /payments/fraud-alerts` con un token Admin, y en Kafka UI revisa el tópico `payment-attempts`:
 los 4 mensajes quedan en la **misma partición**.

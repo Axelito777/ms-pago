@@ -61,6 +61,16 @@ public class GlobalExceptionHandler {
         return construir(HttpStatus.NOT_FOUND, ex.getMessage(), req, null);
     }
 
+    @ExceptionHandler(WebpayNotConfiguredException.class)
+    public ResponseEntity<ErrorResponse> webpaySinConfigurar(WebpayNotConfiguredException ex, HttpServletRequest req) {
+        return construir(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), req, null);
+    }
+
+    @ExceptionHandler(WebpayGatewayException.class)
+    public ResponseEntity<ErrorResponse> webpayFallo(WebpayGatewayException ex, HttpServletRequest req) {
+        return construir(HttpStatus.BAD_GATEWAY, ex.getMessage(), req, null);
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> inesperado(Exception ex, HttpServletRequest req) {
         // Errores propios de Spring MVC (404 de ruta, 405 método, etc.) conservan su código

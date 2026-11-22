@@ -91,7 +91,8 @@ public class PaymentService {
                 pago.getCurrency(),
                 pago.getStatus(),
                 pago.isFraudSuspected(),
-                clock.instant()));
+                clock.instant(),
+                pago.getMethod()));
 
         return PaymentResponse.from(pago);
     }

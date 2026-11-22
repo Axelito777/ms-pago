@@ -64,12 +64,16 @@ public class PaymentController {
         return paymentService.listarAlertas();
     }
 
-    /** APPROVED -> 201, REJECTED -> 402, BLOCKED_FRAUD -> 429 */
+    /**
+     * APPROVED -> 201, REJECTED -> 402, BLOCKED_FRAUD -> 429.
+     * PENDING y CANCELLED son solo de Webpay; el pago simulado nunca los produce.
+     */
     private HttpStatus codigoHttp(PaymentStatus status) {
         return switch (status) {
             case APPROVED -> HttpStatus.CREATED;
             case REJECTED -> HttpStatus.PAYMENT_REQUIRED;
             case BLOCKED_FRAUD -> HttpStatus.TOO_MANY_REQUESTS;
+            case PENDING, CANCELLED -> HttpStatus.OK;
         };
     }
 }

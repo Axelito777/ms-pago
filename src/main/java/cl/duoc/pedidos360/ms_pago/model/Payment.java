@@ -13,6 +13,7 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import lombok.ToString;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -39,11 +40,32 @@ public class Payment {
     @Column(nullable = false)
     private String userId;
 
-    @Column(nullable = false, length = 64)
+    /** Medio de pago. Por defecto SIMULATED (así siguen los pagos con tarjeta de siempre) */
+    @Builder.Default
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 10)
+    private PaymentMethod method = PaymentMethod.SIMULATED;
+
+    /** null en Webpay: la tarjeta nunca pasa por nosotros */
+    @Column(length = 64)
     private String cardHash;
 
-    @Column(nullable = false, length = 4)
+    /** En Webpay se completa al confirmar (Transbank devuelve los últimos 4 dígitos) */
+    @Column(length = 4)
     private String last4;
+
+    /** Webpay: orden de compra enviada a Transbank (máx. 26 caracteres, única) */
+    @Column(unique = true, length = 26)
+    private String buyOrder;
+
+    /** Webpay: token de la transacción (token_ws). Fuera del toString para que nunca termine en un log */
+    @ToString.Exclude
+    @Column(unique = true, length = 100)
+    private String webpayToken;
+
+    /** Webpay: código de autorización que entrega Transbank al aprobar */
+    @Column(length = 20)
+    private String authorizationCode;
 
     private String cardHolder;
 

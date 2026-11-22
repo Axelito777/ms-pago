@@ -1,6 +1,7 @@
 package cl.duoc.pedidos360.ms_pago.event;
 
 import cl.duoc.pedidos360.ms_pago.config.KafkaTopics;
+import cl.duoc.pedidos360.ms_pago.model.PaymentMethod;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -24,7 +25,9 @@ public class PaymentEventPublisher {
             // Dentro de una partición Kafka garantiza el orden, por lo que el consumidor ve
             // los intentos de cada tarjeta en el orden en que ocurrieron (clave para auditar fraude).
             // Usamos el hash y no el número: la tarjeta real nunca sale del servicio.
-            kafkaTemplate.send(KafkaTopics.PAYMENT_ATTEMPTS, evento.cardHash(), evento)
+            // En Webpay no conocemos la tarjeta (se escribe en Transbank): la KEY es el userId,
+            // así los pagos Webpay de un mismo usuario quedan ordenados en una partición.
+            kafkaTemplate.send(KafkaTopics.PAYMENT_ATTEMPTS, key(evento), evento)
                     .whenComplete((resultado, error) -> {
                         // Error asíncrono: el broker no confirmó el mensaje
                         if (error != null) {
@@ -40,5 +43,10 @@ public class PaymentEventPublisher {
             log.error("Kafka no disponible, el intento de pago {} no se publicó: {}",
                     evento.paymentId(), e.getMessage());
         }
+    }
+
+    /** cardHash para el pago simulado, userId para Webpay */
+    static String key(PaymentAttemptEvent evento) {
+        return evento.method() == PaymentMethod.WEBPAY ? evento.userId() : evento.cardHash();
     }
 }
