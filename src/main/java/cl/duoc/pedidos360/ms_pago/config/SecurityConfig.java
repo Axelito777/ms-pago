@@ -56,6 +56,7 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST, "/payments/webpay/init").hasAuthority("SCOPE_payments.write")
                         .requestMatchers(HttpMethod.POST, "/payments").hasAuthority("SCOPE_payments.write")
                         .requestMatchers(HttpMethod.GET, "/payments").hasAuthority("SCOPE_payments.read")
+                        .requestMatchers(HttpMethod.GET, "/payments/audit").hasAuthority("SCOPE_payments.read")
                         .requestMatchers(HttpMethod.GET, "/payments/{id}").hasAuthority("SCOPE_payments.read")
                         .requestMatchers(HttpMethod.GET, "/payments/fraud-alerts").hasAuthority("SCOPE_payments.read")
                         // Todo lo que no está listado queda bloqueado

@@ -66,6 +66,11 @@ public class GlobalExceptionHandler {
         return construir(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), req, null);
     }
 
+    @ExceptionHandler(AuditStoreUnavailableException.class)
+    public ResponseEntity<ErrorResponse> auditoriaNoDisponible(AuditStoreUnavailableException ex, HttpServletRequest req) {
+        return construir(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), req, null);
+    }
+
     @ExceptionHandler(WebpayGatewayException.class)
     public ResponseEntity<ErrorResponse> webpayFallo(WebpayGatewayException ex, HttpServletRequest req) {
         return construir(HttpStatus.BAD_GATEWAY, ex.getMessage(), req, null);

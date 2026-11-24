@@ -2,7 +2,8 @@
 
 Recibe intentos de pago, aplica un **antifraude por ventana deslizante** y publica **cada intento**
 (aprobado, rechazado o bloqueado) en el tópico Kafka `payment-attempts`. Un consumidor del mismo
-servicio (`payment-audit-group`) lee ese tópico y guarda una auditoría.
+servicio (`payment-audit-group`) lee ese tópico y guarda una auditoría (en H2 y, opcionalmente, en
+**DynamoDB**; ver [Auditoría en DynamoDB](#auditoría-en-dynamodb)).
 
 Tiene **dos métodos de pago**: el **simulado** (`POST /payments`, con antifraude) y **Webpay Plus** de
 Transbank en ambiente de integración (ver [Webpay Plus](#webpay-plus)).
@@ -17,7 +18,8 @@ POST /payments ─► validar body ─► userId (token/body) ─► cardHash + 
                                                                  │
                                                   Kafka: payment-attempts (key = cardHash)
                                                                  │
-                                                  @KafkaListener payment-audit-group ─► PaymentAuditLog
+                                                  @KafkaListener payment-audit-group ─► PaymentAuditLog (H2)
+                                                                                     └─► DynamoDB (si está activo)
 ```
 
 ## Datos de tarjeta
@@ -67,6 +69,17 @@ Un `userId` distinto al `oid` del token solo se acepta con rol **Admin** (si no,
 Lista de alertas (`cardHash`, `last4`, `userId`, `cantidadIntentos`, `fecha`, `motivo`). **Solo Admin**:
 sin token → 401, sin rol Admin → 403.
 
+### GET /payments/audit?limit=20
+Intentos de pago del usuario del token (sacados de DynamoDB), **más recientes primero**. El usuario es
+siempre el `oid` del token: no hay parámetro `userId`, así que cada uno ve solo los suyos.
+`limit` por defecto 20; fuera de rango se ajusta a 1..50.
+```json
+[ { "eventId": "uuid", "paymentId": 7, "orderId": 55, "last4": "6623", "amount": 25990, "currency": "CLP",
+    "status": "APPROVED", "method": "WEBPAY", "fraudSuspected": false, "timestamp": "2026-11-23T14:05:09Z" } ]
+```
+**Respuestas:** `200` · `401` sin token / token inválido / sin `oid` · `403` sin `payments.read` ·
+`503` DynamoDB desactivado (`DYNAMODB_ENABLED=false`) o sin respuesta (mensajes distintos).
+
 ## Seguridad (JWT de Azure Entra ID)
 El servicio valida el token por su cuenta, además del API Gateway (`config/SecurityConfig`):
 - **Firma** con las llaves públicas de Azure (JWKS; se descargan con el primer token, no al arrancar).
@@ -80,6 +93,7 @@ El servicio valida el token por su cuenta, además del API Gateway (`config/Secu
 | POST | `/payments` | `payments.write` |
 | GET | `/payments` | `payments.read` |
 | GET | `/payments/{id}` | `payments.read` |
+| GET | `/payments/audit` | `payments.read` |
 | GET | `/payments/fraud-alerts` | `payments.read` |
 | POST | `/payments/webpay/init` | `payments.write` |
 | GET, POST | `/payments/webpay/return` | **público** (ver Webpay) |
@@ -127,6 +141,82 @@ Evento publicado:
   "fraudSuspected": false, "timestamp": "2026-11-16T15:00:00Z", "method": "SIMULATED" }
 ```
 En Webpay: `method = "WEBPAY"`, `cardHash = null`, y `status` puede ser `APPROVED`, `REJECTED` o `CANCELLED`.
+
+## Auditoría en DynamoDB
+Además de H2 (que es en memoria y se pierde al reiniciar), el consumidor `payment-audit-group` guarda una
+copia de cada intento en una tabla DynamoDB, que es persistente y administrada por AWS.
+
+```
+payment-attempts ─► PaymentAuditListener ─► PaymentAuditService ─► H2 (PaymentAuditLog)
+                                                               └─► PaymentAuditStore.save()
+                                                                     ├─ DynamoPaymentAuditStore (DYNAMODB_ENABLED=true)
+                                                                     └─ NoOpPaymentAuditStore   (false, por defecto)
+```
+
+### Diseño de la tabla
+| | Atributo | Tipo | Ejemplo |
+|---|---|---|---|
+| Clave de partición | `userId` | S | `oid` del usuario en Entra ID |
+| Clave de orden | `sk` | S | `2026-11-23T14:05:09.000Z#7#APPROVED` |
+| | `eventId`, `last4`, `currency`, `status`, `method`, `timestamp` | S | |
+| | `paymentId`, `orderId`, `amount` | N | |
+| | `fraudSuspected` | BOOL | |
+
+**¿Por qué `userId` + `sk`?**
+- La única consulta que hacemos es "los intentos de **este** usuario, los más recientes primero". En DynamoDB
+  una consulta (`Query`) eficiente necesita la clave de partición exacta, así que esa es `userId`: todos los
+  intentos de un usuario quedan juntos y se leen sin recorrer la tabla (`Scan`).
+- Dentro de la partición, DynamoDB ordena por la clave de orden. Como `sk` **empieza con la fecha**, basta
+  `ScanIndexForward=false` + `Limit` para traer los N más recientes.
+- `paymentId` y `estado` en `sk` la hacen **única**: un mismo pago puede tener varios intentos o estados
+  (ej. Webpay `PENDING` → `APPROVED`) sin pisarse. Y si Kafka entrega dos veces el mismo evento, la clave es
+  idéntica y el `PutItem` reemplaza el ítem: **no se duplica**.
+- La fecha va **siempre en UTC y con milisegundos** (`.000Z`): con `Instant.toString()` el largo cambia según
+  los decimales y el orden alfabético dejaría de ser cronológico.
+
+**Qué NO se guarda:** número de tarjeta, CVV, token de Webpay ni `cardHash` (un hash de tarjeta sin sal se
+puede revertir probando todas las tarjetas posibles). Solo `last4`. Hay un test que lo verifica.
+
+### Si DynamoDB falla
+- **Al guardar:** se captura la excepción y se loguea solo `paymentId`, estado y tipo de error. El consumidor
+  de Kafka sigue y el pago no se ve afectado (el pago ya respondió antes; esto ocurre en el consumidor).
+  Cada llamada tiene un máximo de 3 s (1 s por intento) para no frenar al consumidor.
+- Eventos sin `userId` no se guardan en DynamoDB (warning en el log).
+- **Al consultar:** `503`.
+
+### Crear la tabla (CLI, una vez)
+El servicio **no** crea la tabla.
+```bash
+aws dynamodb create-table \
+  --table-name pedidos360-payment-audit \
+  --attribute-definitions AttributeName=userId,AttributeType=S AttributeName=sk,AttributeType=S \
+  --key-schema AttributeName=userId,KeyType=HASH AttributeName=sk,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST \
+  --region us-east-1
+```
+
+### Credenciales y permisos
+Sin claves en el código ni en properties: el SDK usa su **cadena de credenciales por defecto**. En la EC2
+vienen del **perfil de instancia** (rol IAM). Permiso mínimo del rol:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["dynamodb:PutItem", "dynamodb:Query"],
+    "Resource": "arn:aws:dynamodb:us-east-1:<ACCOUNT_ID>:table/pedidos360-payment-audit"
+  }]
+}
+```
+Si el contenedor no ve el rol de la instancia (IMDSv2 con límite de saltos 1), sube el límite a 2:
+`aws ec2 modify-instance-metadata-options --instance-id <INSTANCE_ID> --http-put-response-hop-limit 2`.
+
+### Probarlo
+1. `DYNAMODB_ENABLED=true` en el `.env` y reiniciar el contenedor.
+2. Hacer un pago (simulado o Webpay).
+3. `GET /payments/audit?limit=5` con un token con `payments.read` → aparece el intento.
+4. En AWS: `aws dynamodb query --table-name pedidos360-payment-audit --key-condition-expression "userId = :u" --expression-attribute-values '{":u":{"S":"<OID>"}}' --no-scan-index-forward`
+5. Con `DYNAMODB_ENABLED=false`: el pago funciona igual y `GET /payments/audit` responde 503.
 
 ## Webpay Plus
 Webpay **saca al usuario de nuestra página**: la tarjeta se escribe en el sitio de Transbank, nunca aquí.
@@ -218,10 +308,13 @@ Anular: en la pantalla de Webpay, botón "Anular compra y volver" → `CANCELLED
 | `WEBPAY_API_KEY` | vacío | Llave secreta de Transbank. **Solo en `.env`** |
 | `WEBPAY_RETURN_URL` | vacío | URL pública (Gateway) de `/payments/webpay/return` |
 | `WEBPAY_FRONTEND_RESULT_URL` | vacío | Pantalla de resultado del frontend, ej. `https://front/#/pago/resultado` |
+| `DYNAMODB_ENABLED` | `false` | `true` guarda la auditoría en DynamoDB y habilita `GET /payments/audit` |
+| `DYNAMODB_PAYMENT_AUDIT_TABLE` | `pedidos360-payment-audit` | Nombre de la tabla (la crea el alumno) |
+| `AWS_REGION` | `us-east-1` | Región de la tabla |
 
 ## Cómo probarlo
 ```bash
-mvn clean package          # 115 tests, sin broker ni Transbank (Webpay falso + MockRestServiceServer)
+mvn clean package          # 132 tests, sin broker, Transbank ni AWS (DynamoDbClient simulado)
 docker build -t ms-pago .
 docker run -d --name ms-pago -p 8087:8087 --env-file .env ms-pago
 ```

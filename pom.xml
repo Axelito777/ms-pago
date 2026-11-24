@@ -16,7 +16,22 @@
 
 	<properties>
 		<java.version>17</java.version>
+		<!-- AWS SDK v2 (DynamoDB para la auditoría de pagos) -->
+		<aws.sdk.version>2.59.8</aws.sdk.version>
 	</properties>
+
+	<!-- BOM del AWS SDK: fija la misma versión para todos los módulos de AWS -->
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>software.amazon.awssdk</groupId>
+				<artifactId>bom</artifactId>
+				<version>${aws.sdk.version}</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
 
 	<dependencies>
 		<dependency>
@@ -38,6 +53,18 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-kafka</artifactId>
+		</dependency>
+		<!-- DynamoDB: cliente "enhanced" que mapea una clase Java a los ítems de la tabla -->
+		<dependency>
+			<groupId>software.amazon.awssdk</groupId>
+			<artifactId>dynamodb-enhanced</artifactId>
+			<exclusions>
+				<!-- Solo usamos el cliente síncrono: Netty (cliente async) sobra y engorda el jar -->
+				<exclusion>
+					<groupId>software.amazon.awssdk</groupId>
+					<artifactId>netty-nio-client</artifactId>
+				</exclusion>
+			</exclusions>
 		</dependency>
 		<dependency>
 			<groupId>com.h2database</groupId>
