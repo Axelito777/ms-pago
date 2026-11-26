@@ -1,15 +1,18 @@
 package cl.duoc.pedidos360.ms_pago.controller;
 
 import cl.duoc.pedidos360.ms_pago.dto.FraudAlertResponse;
+import cl.duoc.pedidos360.ms_pago.dto.FraudStatusResponse;
 import cl.duoc.pedidos360.ms_pago.dto.PaymentRequest;
 import cl.duoc.pedidos360.ms_pago.dto.PaymentResponse;
 import cl.duoc.pedidos360.ms_pago.model.PaymentStatus;
 import cl.duoc.pedidos360.ms_pago.security.JwtClaims;
 import cl.duoc.pedidos360.ms_pago.service.PaymentService;
+import cl.duoc.pedidos360.ms_pago.service.UserBlockService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -31,6 +34,7 @@ import java.util.List;
 public class PaymentController {
 
     private final PaymentService paymentService;
+    private final UserBlockService userBlockService;
     private final JwtClaims jwtClaims;
 
     @PostMapping
@@ -62,6 +66,33 @@ public class PaymentController {
             @RequestHeader(value = "Authorization", required = false) String authHeader) {
         jwtClaims.exigirAdmin(authHeader);
         return paymentService.listarAlertas();
+    }
+
+    /**
+     * Estado de bloqueo del usuario. Lo usa el frontend al recargar y lo consultan carrito-service
+     * y orders-service reenviando el JWT del usuario. Solo el dueño o un Admin (si no, 403).
+     */
+    @GetMapping("/fraud-status/{userId}")
+    public FraudStatusResponse estadoFraude(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @PathVariable String userId) {
+        jwtClaims.verificarAcceso(authHeader, userId);
+        return userBlockService.bloqueadoHasta(userId)
+                .map(hasta -> new FraudStatusResponse(true, hasta))
+                .orElse(new FraudStatusResponse(false, null));
+    }
+
+    /**
+     * Desbloqueo manual para la demo. Exige el rol "Admin" en el claim "roles",
+     * igual que kafka-admin-service, así un mismo token sirve en ambos. 204 siempre (idempotente).
+     */
+    @DeleteMapping("/fraud-blocks/{userId}")
+    public ResponseEntity<Void> desbloquear(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @PathVariable String userId) {
+        jwtClaims.exigirAdmin(authHeader);
+        userBlockService.desbloquear(userId);
+        return ResponseEntity.noContent().build();
     }
 
     /**

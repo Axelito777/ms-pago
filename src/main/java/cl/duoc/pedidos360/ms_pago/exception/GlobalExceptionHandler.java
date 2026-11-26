@@ -1,6 +1,7 @@
 package cl.duoc.pedidos360.ms_pago.exception;
 
 import cl.duoc.pedidos360.ms_pago.dto.ErrorResponse;
+import cl.duoc.pedidos360.ms_pago.dto.UserBlockedResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -44,6 +45,12 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(BadRequestException.class)
     public ResponseEntity<ErrorResponse> badRequest(BadRequestException ex, HttpServletRequest req) {
         return construir(HttpStatus.BAD_REQUEST, ex.getMessage(), req, null);
+    }
+
+    /** 423 Locked: el usuario está bloqueado por el antifraude */
+    @ExceptionHandler(UserBlockedException.class)
+    public ResponseEntity<UserBlockedResponse> usuarioBloqueado(UserBlockedException ex) {
+        return ResponseEntity.status(HttpStatus.LOCKED).body(UserBlockedResponse.hasta(ex.getUntil()));
     }
 
     @ExceptionHandler(UnauthorizedException.class)

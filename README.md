@@ -52,11 +52,25 @@ POST /payments ─► validar body ─► userId (token/body) ─► cardHash + 
 | `amount` | mayor que 0 |
 | `currency` | 3 letras mayúsculas; si no viene, `CLP` |
 
-**Respuestas:** `201` aprobado · `402` rechazado por la pasarela · `429` bloqueado por fraude ·
-`400` validación (no cuenta en la ventana antifraude) · `401` token ilegible · `403` userId ajeno sin Admin.
+**Respuestas:** `201` aprobado · `402` rechazado por la pasarela · `429` bloqueado por fraude (y el usuario
+queda bloqueado) · `423` usuario bloqueado · `400` validación (no cuenta en la ventana antifraude) · `401` token ilegible · `403` userId ajeno sin Admin.
 
 Para probar: tarjeta que termina en `0000` (ej. `4000000000000000`) → **402**.
-La misma tarjeta enviada **4 veces en menos de 10 s** → la 4.ª da **429**.
+4 intentos del mismo usuario en menos de 10 s (con la misma tarjeta **o con tarjetas distintas**) → el 4.º da
+**429** y el usuario queda bloqueado `BLOCK_MINUTES`. El 5.º da **423**:
+```json
+{ "error": "USER_BLOCKED", "until": "2026-11-26T16:40:00Z", "message": "Tu cuenta está bloqueada temporalmente por actividad sospechosa" }
+```
+
+### GET /payments/fraud-status/{userId}
+Estado de bloqueo: `{"blocked": true, "until": "2026-11-26T16:40:00Z"}` o `{"blocked": false, "until": null}`.
+Solo el dueño (`oid` = `userId`) o un Admin (si no, 403). Lo usa el frontend al recargar, y lo consultan
+carrito-service (confirmar) y orders-service (crear pedido) reenviando el JWT del usuario.
+
+### DELETE /payments/fraud-blocks/{userId}
+Desbloqueo manual para la demo → `204`. Exige el rol **`Admin`** en el claim **`roles`** (valor exacto, lista o
+texto), **igual que kafka-admin-service**: un mismo token Admin sirve en ambos. Sin rol → 403.
+También borra el conteo del usuario en la ventana.
 
 ### GET /payments/{id}
 Detalle de un pago. Con token, solo el dueño o un Admin (si no, 403). Inexistente → 404.
@@ -66,7 +80,7 @@ Pagos del usuario. Sin `userId` se usa el `oid` del token; si no hay ninguno →
 Un `userId` distinto al `oid` del token solo se acepta con rol **Admin** (si no, 403).
 
 ### GET /payments/fraud-alerts
-Lista de alertas (`cardHash`, `last4`, `userId`, `cantidadIntentos`, `fecha`, `motivo`). **Solo Admin**:
+Lista de alertas (`cardHash`, `last4`, `userId`, `cantidadIntentos`, `fecha`, `motivo`, `blockedUntil`). **Solo Admin**:
 sin token → 401, sin rol Admin → 403.
 
 ### GET /payments/audit?limit=20
@@ -95,6 +109,8 @@ El servicio valida el token por su cuenta, además del API Gateway (`config/Secu
 | GET | `/payments/{id}` | `payments.read` |
 | GET | `/payments/audit` | `payments.read` |
 | GET | `/payments/fraud-alerts` | `payments.read` |
+| GET | `/payments/fraud-status/{userId}` | `payments.read` (+ dueño o Admin) |
+| DELETE | `/payments/fraud-blocks/{userId}` | `payments.write` (+ rol `Admin`) |
 | POST | `/payments/webpay/init` | `payments.write` |
 | GET, POST | `/payments/webpay/return` | **público** (ver Webpay) |
 
@@ -108,15 +124,23 @@ Con el token ya validado por `SecurityConfig`, este servicio lee el payload a ma
 - `roles` debe contener `Admin` para ver alertas u operar con otro `userId`. Si `roles` no existe o no es
   una lista, se trata como vacío.
 
-## Antifraude (ventana deslizante)
-Por cada `cardHash` se guardan los instantes de los intentos recientes. En cada intento se descartan los
+## Antifraude (ventana deslizante + bloqueo del usuario)
+Cada intento se cuenta **dos veces**: por tarjeta (`card:<hash>`) y por usuario (`user:<oid>`), así cambiar de
+tarjeta no evita el conteo. Por cada clave se guardan los instantes de los intentos recientes. En cada intento se descartan los
 de hace 10 s o más, se agrega el actual y, si quedan **más de 3**, se bloquea (`BLOCKED_FRAUD`): se crea
 una `FraudAlert`, se loguea una advertencia y **no se llama a la pasarela**.
 - Los intentos bloqueados **también cuentan**: si se sigue insistiendo, se sigue bloqueando.
 - Los 400 por validación **no** cuentan (se rechazan antes de llegar al antifraude).
-- Una tarea periódica elimina de memoria las tarjetas sin intentos recientes.
+- Una tarea periódica elimina de memoria las claves sin intentos recientes.
 
-**Limitación:** la ventana vive **en memoria** (`ConcurrentHashMap`). Se pierde al reiniciar y no se
+**Bloqueo del usuario:** el intento que da 429 bloquea al usuario (`oid`) por `BLOCK_MINUTES` (10 por defecto).
+Mientras dura, `POST /payments` y `POST /payments/webpay/init` responden **423** sin llamar a la pasarela ni
+guardar nada; carrito-service y orders-service consultan `fraud-status` y también responden 423. El bloqueo
+expira solo, o lo quita un Admin con `DELETE /payments/fraud-blocks/{userId}`. La alerta guarda `blockedUntil`,
+y el evento de ese intento en `payment-attempts` también lo lleva (es el **evento de bloqueo**; en los demás
+intentos viene `null`). Webpay no suma intentos (la tarjeta no pasa por nosotros), pero respeta el bloqueo.
+
+**Limitación:** la ventana y los bloqueos viven **en memoria** (`ConcurrentHashMap`). Se pierde al reiniciar y no se
 comparte si hay varias instancias del servicio. En producción se usaría Redis o una consulta a BD.
 
 ## Pasarela
@@ -301,6 +325,7 @@ Anular: en la pantalla de Webpay, botón "Anular compra y volver" → `CANCELLED
 | `FRAUD_WINDOW_SECONDS` | `10` | Tamaño de la ventana |
 | `FRAUD_MAX_ATTEMPTS` | `3` | Intentos permitidos en la ventana |
 | `FRAUD_CLEANUP_INTERVAL_MS` | `60000` | Cada cuánto se limpia la memoria |
+| `BLOCK_MINUTES` | `10` | Minutos de bloqueo del usuario tras el 429 |
 | `DB_USERNAME` / `DB_PASSWORD` | `sa` / vacío | H2 |
 | `SPRING_PROFILES_ACTIVE` | — | `prod` en el servidor |
 | `WEBPAY_BASE_URL` | `https://webpay3gint.transbank.cl` | API de Transbank (integración) |

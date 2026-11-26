@@ -4,10 +4,12 @@ import cl.duoc.pedidos360.ms_pago.config.SecurityConfig;
 import cl.duoc.pedidos360.ms_pago.dto.PaymentRequest;
 import cl.duoc.pedidos360.ms_pago.dto.PaymentResponse;
 import cl.duoc.pedidos360.ms_pago.exception.ResourceNotFoundException;
+import cl.duoc.pedidos360.ms_pago.exception.UserBlockedException;
 import cl.duoc.pedidos360.ms_pago.model.PaymentMethod;
 import cl.duoc.pedidos360.ms_pago.model.PaymentStatus;
 import cl.duoc.pedidos360.ms_pago.security.JwtClaims;
 import cl.duoc.pedidos360.ms_pago.service.PaymentService;
+import cl.duoc.pedidos360.ms_pago.service.UserBlockService;
 import cl.duoc.pedidos360.ms_pago.support.TokenDePrueba;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,10 +23,12 @@ import org.springframework.test.web.servlet.MockMvc;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
@@ -34,6 +38,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -60,6 +65,9 @@ class PaymentControllerTest {
 
     @MockitoBean
     private PaymentService paymentService;
+
+    @MockitoBean
+    private UserBlockService userBlockService;
 
     // ------------------------------ helpers ------------------------------
 
@@ -245,5 +253,94 @@ class PaymentControllerTest {
                 .andExpect(status().isForbidden()); // sin claim roles = lista vacía
         mockMvc.perform(get("/payments/fraud-alerts").header("Authorization", TOKEN_ADMIN))
                 .andExpect(status().isOk());
+    }
+
+    // ------------------------- Bloqueo del usuario -------------------------
+
+    private static final Instant HASTA = Instant.parse("2026-11-26T16:40:00Z");
+
+    @Test
+    void usuarioBloqueado_423_conErrorYUntil() throws Exception {
+        when(paymentService.procesar(any(), eq("oid-user"))).thenThrow(new UserBlockedException("oid-user", HASTA));
+
+        mockMvc.perform(post("/payments").header("Authorization", TOKEN_USER)
+                        .contentType(MediaType.APPLICATION_JSON).content(bodyValido(null)))
+                .andExpect(status().isLocked())
+                .andExpect(jsonPath("$.error").value("USER_BLOCKED"))
+                .andExpect(jsonPath("$.until").value("2026-11-26T16:40:00Z"));
+    }
+
+    @Test
+    void fraudStatus_duenoBloqueado_200() throws Exception {
+        when(userBlockService.bloqueadoHasta("oid-user")).thenReturn(Optional.of(HASTA));
+
+        mockMvc.perform(get("/payments/fraud-status/oid-user").header("Authorization", TOKEN_USER))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.blocked").value(true))
+                .andExpect(jsonPath("$.until").value("2026-11-26T16:40:00Z"));
+    }
+
+    @Test
+    void fraudStatus_duenoNoBloqueado_200() throws Exception {
+        when(userBlockService.bloqueadoHasta("oid-user")).thenReturn(Optional.empty());
+
+        mockMvc.perform(get("/payments/fraud-status/oid-user").header("Authorization", TOKEN_USER))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.blocked").value(false))
+                .andExpect(jsonPath("$.until").doesNotExist());
+    }
+
+    @Test
+    void fraudStatus_deOtroUsuario_403() throws Exception {
+        mockMvc.perform(get("/payments/fraud-status/oid-otro").header("Authorization", TOKEN_USER))
+                .andExpect(status().isForbidden());
+        verify(userBlockService, never()).bloqueadoHasta(any());
+    }
+
+    @Test
+    void fraudStatus_adminVeOtroUsuario_200() throws Exception {
+        when(userBlockService.bloqueadoHasta("oid-otro")).thenReturn(Optional.empty());
+
+        mockMvc.perform(get("/payments/fraud-status/oid-otro").header("Authorization", TOKEN_ADMIN))
+                .andExpect(status().isOk());
+    }
+
+    /** Mismo claim y valor que kafka-admin-service: roles contiene "Admin" */
+    @Test
+    void desbloquear_conRolAdmin_204() throws Exception {
+        mockMvc.perform(delete("/payments/fraud-blocks/oid-user").header("Authorization", TOKEN_ADMIN))
+                .andExpect(status().isNoContent());
+        verify(userBlockService).desbloquear("oid-user");
+    }
+
+    @Test
+    void desbloquear_rolAdminComoTexto_204() throws Exception {
+        mockMvc.perform(delete("/payments/fraud-blocks/oid-user")
+                        .header("Authorization", token("{\"oid\":\"oid-admin\",\"roles\":\"Admin\"}")))
+                .andExpect(status().isNoContent());
+    }
+
+    @Test
+    void desbloquear_sinRolAdmin_403() throws Exception {
+        mockMvc.perform(delete("/payments/fraud-blocks/oid-user").header("Authorization", TOKEN_USER))
+                .andExpect(status().isForbidden());
+        verify(userBlockService, never()).desbloquear(any());
+    }
+
+    /** El valor es exacto (como en kafka-admin-service): "admin" en minúscula no sirve */
+    @Test
+    void desbloquear_rolConOtraMayuscula_403() throws Exception {
+        mockMvc.perform(delete("/payments/fraud-blocks/oid-user")
+                        .header("Authorization", token("{\"oid\":\"oid-x\",\"roles\":[\"admin\"]}")))
+                .andExpect(status().isForbidden());
+        verify(userBlockService, never()).desbloquear(any());
+    }
+
+    @Test
+    void desbloquear_adminSinScopeWrite_403() throws Exception {
+        mockMvc.perform(delete("/payments/fraud-blocks/oid-user")
+                        .header("Authorization", token("{\"oid\":\"oid-admin\",\"roles\":[\"Admin\"],\"scp\":\"payments.read\"}")))
+                .andExpect(status().isForbidden());
+        verify(userBlockService, never()).desbloquear(any());
     }
 }

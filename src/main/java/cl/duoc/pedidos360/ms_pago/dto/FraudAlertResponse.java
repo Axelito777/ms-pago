@@ -2,6 +2,7 @@ package cl.duoc.pedidos360.ms_pago.dto;
 
 import cl.duoc.pedidos360.ms_pago.model.FraudAlert;
 
+import java.time.Instant;
 import java.time.LocalDateTime;
 
 /** Alerta de fraude para GET /payments/fraud-alerts (solo Admin) */
@@ -12,10 +13,11 @@ public record FraudAlertResponse(
         String userId,
         int cantidadIntentos,
         LocalDateTime fecha,
-        String motivo) {
+        String motivo,
+        Instant blockedUntil) {
 
     public static FraudAlertResponse from(FraudAlert a) {
         return new FraudAlertResponse(a.getId(), a.getCardHash(), a.getLast4(), a.getUserId(),
-                a.getCantidadIntentos(), a.getFecha(), a.getMotivo());
+                a.getCantidadIntentos(), a.getFecha(), a.getMotivo(), a.getBlockedUntil());
     }
 }

@@ -49,6 +49,7 @@ public class WebpayService {
     static final String ESTADO_DESCONOCIDO = "UNKNOWN";
 
     private final WebpayClient webpayClient;
+    private final UserBlockService userBlockService;
     private final WebpayProperties props;
     private final PaymentRepository paymentRepository;
     private final PaymentEventPublisher eventPublisher;
@@ -57,6 +58,8 @@ public class WebpayService {
     // ------------------------------ 1) INICIAR ------------------------------
 
     public WebpayInitResponse iniciar(WebpayInitRequest request, String userId) {
+        // Usuario bloqueado por el antifraude: 423, no se crea nada en Transbank
+        userBlockService.verificarNoBloqueado(userId);
         if (!props.puedeIniciar()) {
             throw new WebpayNotConfiguredException("Webpay no está configurado: faltan WEBPAY_COMMERCE_CODE, "
                     + "WEBPAY_API_KEY o WEBPAY_RETURN_URL");

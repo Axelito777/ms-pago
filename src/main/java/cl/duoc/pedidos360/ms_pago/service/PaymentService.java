@@ -18,14 +18,17 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 
 /**
  * Flujo de un intento de pago:
+ *  0) si el usuario está bloqueado -> 423 (no cuenta como intento ni se guarda)
  *  1) tarjeta -> cardHash + last4 (el número y el CVV se descartan aquí)
- *  2) antifraude: si supera el máximo en la ventana -> BLOCKED_FRAUD + FraudAlert (no se llama a la pasarela)
+ *  2) antifraude por tarjeta Y por usuario: si alguno supera el máximo -> BLOCKED_FRAUD (429) + FraudAlert,
+ *     y el usuario queda bloqueado BLOCK_MINUTES (no se llama a la pasarela)
  *  3) si no, la pasarela decide APPROVED o REJECTED
  *  4) se guarda el Payment y se publica el evento en Kafka (si Kafka falla, el pago sigue)
  */
@@ -36,6 +39,7 @@ public class PaymentService {
 
     private final CardDataService cardDataService;
     private final FraudDetectionService fraudDetectionService;
+    private final UserBlockService userBlockService;
     private final PaymentGateway paymentGateway;
     private final PaymentRepository paymentRepository;
     private final FraudAlertRepository fraudAlertRepository;
@@ -44,18 +48,28 @@ public class PaymentService {
     private final Clock clock;
 
     public PaymentResponse procesar(PaymentRequest request, String userId) {
+        // 0) Usuario bloqueado: 423 antes de tocar la tarjeta o la ventana
+        userBlockService.verificarNoBloqueado(userId);
+
         String cardHash = cardDataService.hash(request.getCardNumber());
         String last4 = cardDataService.last4(request.getCardNumber());
 
-        FraudCheckResult fraude = fraudDetectionService.registrarIntento(cardHash);
+        // 2) Se cuenta por tarjeta y por usuario: cambiar de tarjeta no reinicia el conteo del usuario
+        FraudCheckResult porTarjeta = fraudDetectionService.registrarIntento(FraudDetectionService.claveTarjeta(cardHash));
+        FraudCheckResult porUsuario = fraudDetectionService.registrarIntento(FraudDetectionService.claveUsuario(userId));
+        boolean bloqueado = porTarjeta.bloqueado() || porUsuario.bloqueado();
+        int intentos = Math.max(porTarjeta.intentosEnVentana(), porUsuario.intentosEnVentana());
 
         PaymentStatus status;
         String mensaje;
-        if (fraude.bloqueado()) {
+        Instant bloqueadoHasta = null;
+        if (bloqueado) {
             status = PaymentStatus.BLOCKED_FRAUD;
-            mensaje = "Bloqueado por posible fraude: " + fraude.intentosEnVentana() + " intentos en "
-                    + fraudProperties.getWindowSeconds() + " s (máximo " + fraudProperties.getMaxAttempts() + ")";
-            registrarAlerta(cardHash, last4, userId, fraude.intentosEnVentana(), mensaje);
+            bloqueadoHasta = userBlockService.bloquear(userId);
+            mensaje = "Bloqueado por posible fraude: " + intentos + " intentos en "
+                    + fraudProperties.getWindowSeconds() + " s (máximo " + fraudProperties.getMaxAttempts()
+                    + "). Usuario bloqueado hasta " + bloqueadoHasta;
+            registrarAlerta(cardHash, last4, userId, intentos, mensaje, bloqueadoHasta);
         } else {
             PaymentGateway.GatewayResult resultado =
                     paymentGateway.procesar(last4, request.getAmount(), request.getCurrency());
@@ -72,7 +86,7 @@ public class PaymentService {
                 .amount(request.getAmount())
                 .currency(request.getCurrency())
                 .status(status)
-                .fraudSuspected(fraude.bloqueado())
+                .fraudSuspected(bloqueado)
                 .message(mensaje)
                 .createdAt(LocalDateTime.now(clock))
                 .build());
@@ -92,7 +106,8 @@ public class PaymentService {
                 pago.getStatus(),
                 pago.isFraudSuspected(),
                 clock.instant(),
-                pago.getMethod()));
+                pago.getMethod(),
+                bloqueadoHasta)); // solo el intento que bloqueó lo trae: es el evento de bloqueo
 
         return PaymentResponse.from(pago);
     }
@@ -118,7 +133,8 @@ public class PaymentService {
                 .toList();
     }
 
-    private void registrarAlerta(String cardHash, String last4, String userId, int intentos, String motivo) {
+    private void registrarAlerta(String cardHash, String last4, String userId, int intentos, String motivo,
+                                 Instant bloqueadoHasta) {
         fraudAlertRepository.save(FraudAlert.builder()
                 .cardHash(cardHash)
                 .last4(last4)
@@ -126,6 +142,7 @@ public class PaymentService {
                 .cantidadIntentos(intentos)
                 .fecha(LocalDateTime.now(clock))
                 .motivo(motivo)
+                .blockedUntil(bloqueadoHasta)
                 .build());
         // Solo un prefijo del hash en el log: suficiente para correlacionar, sin exponer datos de la tarjeta
         log.warn("POSIBLE FRAUDE: tarjeta ****{} (hash {}...) usuario={} intentos={} en {} s",

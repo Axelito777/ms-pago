@@ -59,6 +59,9 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/payments/audit").hasAuthority("SCOPE_payments.read")
                         .requestMatchers(HttpMethod.GET, "/payments/{id}").hasAuthority("SCOPE_payments.read")
                         .requestMatchers(HttpMethod.GET, "/payments/fraud-alerts").hasAuthority("SCOPE_payments.read")
+                        // Estado de bloqueo (dueño o Admin) y desbloqueo (además exige rol Admin en el controller)
+                        .requestMatchers(HttpMethod.GET, "/payments/fraud-status/{userId}").hasAuthority("SCOPE_payments.read")
+                        .requestMatchers(HttpMethod.DELETE, "/payments/fraud-blocks/{userId}").hasAuthority("SCOPE_payments.write")
                         // Todo lo que no está listado queda bloqueado
                         .anyRequest().denyAll())
                 // Resource server: lee el Bearer, lo valida con el JwtDecoder y responde 401/403 estándar

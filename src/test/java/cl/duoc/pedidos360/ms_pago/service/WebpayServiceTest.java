@@ -1,5 +1,6 @@
 package cl.duoc.pedidos360.ms_pago.service;
 
+import cl.duoc.pedidos360.ms_pago.config.FraudProperties;
 import cl.duoc.pedidos360.ms_pago.config.WebpayProperties;
 import cl.duoc.pedidos360.ms_pago.dto.WebpayInitRequest;
 import cl.duoc.pedidos360.ms_pago.dto.WebpayInitResponse;
@@ -7,6 +8,7 @@ import cl.duoc.pedidos360.ms_pago.dto.WebpayReturnResult;
 import cl.duoc.pedidos360.ms_pago.event.PaymentAttemptEvent;
 import cl.duoc.pedidos360.ms_pago.event.PaymentEventPublisher;
 import cl.duoc.pedidos360.ms_pago.exception.BadRequestException;
+import cl.duoc.pedidos360.ms_pago.exception.UserBlockedException;
 import cl.duoc.pedidos360.ms_pago.exception.WebpayGatewayException;
 import cl.duoc.pedidos360.ms_pago.exception.WebpayNotConfiguredException;
 import cl.duoc.pedidos360.ms_pago.model.Payment;
@@ -25,6 +27,8 @@ import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 
 import java.math.BigDecimal;
+
+import static org.mockito.Mockito.verifyNoInteractions;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -53,6 +57,7 @@ class WebpayServiceTest {
     private WebpayProperties props;
     private PaymentEventPublisher publisher;
     private WebpayService service;
+    private UserBlockService userBlockService;
 
     @BeforeEach
     void setUp() {
@@ -63,8 +68,29 @@ class WebpayServiceTest {
         props.setReturnUrl("https://api.test/payments/webpay/return");
         props.setFrontendResultUrl(URL_FRONT);
         publisher = mock(PaymentEventPublisher.class);
-        service = new WebpayService(transbank, props, paymentRepository, publisher,
-                new RelojControlable(Instant.parse("2026-11-22T12:00:00Z")));
+        RelojControlable reloj = new RelojControlable(Instant.parse("2026-11-22T12:00:00Z"));
+        FraudProperties fraudProps = new FraudProperties();
+        userBlockService = new UserBlockService(reloj, fraudProps, new FraudDetectionService(reloj, fraudProps));
+        service = new WebpayService(transbank, userBlockService, props, paymentRepository, publisher, reloj);
+    }
+
+    @Test
+    void init_usuarioBloqueado_423_yNoCreaPagoNiLlamaATransbank() {
+        userBlockService.bloquear(USER);
+        long antes = paymentRepository.count();
+
+        assertThatThrownBy(() -> service.iniciar(request("25990"), USER))
+                .isInstanceOf(UserBlockedException.class);
+
+        assertThat(paymentRepository.count()).isEqualTo(antes);
+        verifyNoInteractions(publisher);
+    }
+
+    @Test
+    void init_otroUsuarioBloqueado_noAfecta() {
+        userBlockService.bloquear("oid-otro");
+
+        assertThat(service.iniciar(request("25990"), USER).token()).isNotBlank();
     }
 
     private WebpayInitRequest request(String monto) {

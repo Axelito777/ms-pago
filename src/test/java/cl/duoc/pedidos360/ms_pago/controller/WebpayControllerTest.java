@@ -1,12 +1,14 @@
 package cl.duoc.pedidos360.ms_pago.controller;
 
 import cl.duoc.pedidos360.ms_pago.config.SecurityConfig;
+import cl.duoc.pedidos360.ms_pago.exception.UserBlockedException;
 import cl.duoc.pedidos360.ms_pago.dto.WebpayInitResponse;
 import cl.duoc.pedidos360.ms_pago.dto.WebpayReturnResult;
 import cl.duoc.pedidos360.ms_pago.exception.WebpayGatewayException;
 import cl.duoc.pedidos360.ms_pago.exception.WebpayNotConfiguredException;
 import cl.duoc.pedidos360.ms_pago.security.JwtClaims;
 import cl.duoc.pedidos360.ms_pago.service.PaymentService;
+import cl.duoc.pedidos360.ms_pago.service.UserBlockService;
 import cl.duoc.pedidos360.ms_pago.service.WebpayService;
 import cl.duoc.pedidos360.ms_pago.support.TokenDePrueba;
 import org.junit.jupiter.api.Test;
@@ -19,6 +21,7 @@ import org.springframework.test.context.bean.override.convention.TestBean;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.time.Instant;
 import java.util.Map;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -51,6 +54,9 @@ class WebpayControllerTest {
     @MockitoBean
     private PaymentService paymentService;
 
+    @MockitoBean
+    private UserBlockService userBlockService;
+
     @TestBean
     private JwtDecoder jwtDecoder;
 
@@ -76,6 +82,18 @@ class WebpayControllerTest {
                 .andExpect(jsonPath("$.token").value("tok"))
                 .andExpect(jsonPath("$.url").value("https://webpay/init"))
                 .andExpect(jsonPath("$.buyOrder").value("P360-7-abc"));
+    }
+
+    @Test
+    void init_usuarioBloqueado_423_conUntil() throws Exception {
+        when(webpayService.iniciar(any(), eq("oid-user")))
+                .thenThrow(new UserBlockedException("oid-user", Instant.parse("2026-11-26T16:40:00Z")));
+
+        mockMvc.perform(post("/payments/webpay/init").header("Authorization", bearer("payments.write"))
+                        .contentType(MediaType.APPLICATION_JSON).content(BODY))
+                .andExpect(status().isLocked())
+                .andExpect(jsonPath("$.error").value("USER_BLOCKED"))
+                .andExpect(jsonPath("$.until").value("2026-11-26T16:40:00Z"));
     }
 
     @Test

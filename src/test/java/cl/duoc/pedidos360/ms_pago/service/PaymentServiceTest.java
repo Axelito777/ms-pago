@@ -5,6 +5,7 @@ import cl.duoc.pedidos360.ms_pago.dto.PaymentRequest;
 import cl.duoc.pedidos360.ms_pago.dto.PaymentResponse;
 import cl.duoc.pedidos360.ms_pago.event.PaymentAttemptEvent;
 import cl.duoc.pedidos360.ms_pago.event.PaymentEventPublisher;
+import cl.duoc.pedidos360.ms_pago.exception.UserBlockedException;
 import cl.duoc.pedidos360.ms_pago.model.FraudAlert;
 import cl.duoc.pedidos360.ms_pago.model.Payment;
 import cl.duoc.pedidos360.ms_pago.model.PaymentStatus;
@@ -19,9 +20,12 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.times;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -38,12 +42,17 @@ class PaymentServiceTest {
     @Mock private PaymentEventPublisher publisher;
 
     private PaymentService service;
+    private UserBlockService userBlockService;
+    private RelojControlable reloj;
 
     @BeforeEach
     void setUp() {
         RelojControlable reloj = new RelojControlable(Instant.parse("2026-11-16T12:00:00Z"));
         FraudProperties props = new FraudProperties();
-        service = new PaymentService(new CardDataService(), new FraudDetectionService(reloj, props), gateway,
+        this.reloj = reloj;
+        FraudDetectionService fraude = new FraudDetectionService(reloj, props);
+        userBlockService = new UserBlockService(reloj, props, fraude);
+        service = new PaymentService(new CardDataService(), fraude, userBlockService, gateway,
                 paymentRepository, fraudAlertRepository, publisher, props, reloj);
         // El repositorio "asigna" id 1 al guardar
         // lenient: no todos los tests guardan pagos
@@ -134,5 +143,90 @@ class PaymentServiceTest {
         String texto = request(TARJETA).toString();
 
         assertThat(texto).doesNotContain(TARJETA).doesNotContain("cardNumber").doesNotContain("cvv");
+    }
+
+    // ------------------------- Bloqueo del USUARIO -------------------------
+
+    private static final String[] TARJETAS = {
+            "4111111111111111", "5555555555554444", "4012888888881881", "378282246310005", "6011111111111117"};
+
+    /** 3 pagos aprobados del usuario, cada uno con una tarjeta distinta */
+    private void tresAprobadosConTarjetasDistintas(String userId) {
+        for (int i = 0; i < 3; i++) {
+            assertThat(service.procesar(request(TARJETAS[i]), userId).status()).isEqualTo(PaymentStatus.APPROVED);
+        }
+    }
+
+    @Test
+    void cuatroIntentosConTarjetasDistintas_elCuarto429_yElQuinto423() {
+        when(gateway.procesar(any(), any(), any())).thenReturn(new PaymentGateway.GatewayResult(true, "ok"));
+        tresAprobadosConTarjetasDistintas("user-1");
+
+        // 4.º con otra tarjeta: la tarjeta es nueva, pero el usuario ya suma 4 en la ventana
+        PaymentResponse cuarto = service.procesar(request(TARJETAS[3]), "user-1");
+        assertThat(cuarto.status()).isEqualTo(PaymentStatus.BLOCKED_FRAUD);
+
+        Instant hasta = reloj.instant().plus(Duration.ofMinutes(10));
+        assertThat(userBlockService.bloqueadoHasta("user-1")).contains(hasta);
+
+        // La alerta y el evento del 4.º llevan blockedUntil (es el evento de bloqueo)
+        ArgumentCaptor<FraudAlert> alerta = ArgumentCaptor.forClass(FraudAlert.class);
+        verify(fraudAlertRepository).save(alerta.capture());
+        assertThat(alerta.getValue().getBlockedUntil()).isEqualTo(hasta);
+        ArgumentCaptor<PaymentAttemptEvent> eventos = ArgumentCaptor.forClass(PaymentAttemptEvent.class);
+        verify(publisher, times(4)).publicar(eventos.capture());
+        assertThat(eventos.getAllValues().get(3).blockedUntil()).isEqualTo(hasta);
+        assertThat(eventos.getAllValues().subList(0, 3)).allMatch(e -> e.blockedUntil() == null);
+
+        // 5.º, con la tarjeta que quede: 423
+        assertThatThrownBy(() -> service.procesar(request(TARJETAS[4]), "user-1"))
+                .isInstanceOf(UserBlockedException.class)
+                .extracting("until").isEqualTo(hasta);
+    }
+
+    @Test
+    void usuarioBloqueado_noLlamaPasarela_noGuarda_niPublica() {
+        userBlockService.bloquear("user-1");
+
+        assertThatThrownBy(() -> service.procesar(request(TARJETA), "user-1"))
+                .isInstanceOf(UserBlockedException.class);
+
+        verify(gateway, never()).procesar(any(), any(), any());
+        verify(paymentRepository, never()).save(any());
+        verify(publisher, never()).publicar(any());
+    }
+
+    @Test
+    void despuesDelDesbloqueo_vuelveAFuncionar() {
+        when(gateway.procesar(any(), any(), any())).thenReturn(new PaymentGateway.GatewayResult(true, "ok"));
+        tresAprobadosConTarjetasDistintas("user-1");
+        service.procesar(request(TARJETAS[3]), "user-1"); // 429 y bloqueo
+
+        assertThat(userBlockService.desbloquear("user-1")).isTrue();
+
+        // El desbloqueo también borra el conteo del usuario: el siguiente pago se aprueba al tiro
+        assertThat(service.procesar(request(TARJETAS[4]), "user-1").status()).isEqualTo(PaymentStatus.APPROVED);
+    }
+
+    @Test
+    void despuesDeLaExpiracion_vuelveAFuncionar() {
+        when(gateway.procesar(any(), any(), any())).thenReturn(new PaymentGateway.GatewayResult(true, "ok"));
+        tresAprobadosConTarjetasDistintas("user-1");
+        service.procesar(request(TARJETAS[3]), "user-1"); // 429 y bloqueo
+
+        reloj.avanzar(Duration.ofMinutes(10).plusSeconds(1));
+
+        assertThat(userBlockService.bloqueadoHasta("user-1")).isEmpty();
+        assertThat(service.procesar(request(TARJETAS[4]), "user-1").status()).isEqualTo(PaymentStatus.APPROVED);
+    }
+
+    @Test
+    void otroUsuario_noSeVeAfectado() {
+        when(gateway.procesar(any(), any(), any())).thenReturn(new PaymentGateway.GatewayResult(true, "ok"));
+        tresAprobadosConTarjetasDistintas("user-1");
+        service.procesar(request(TARJETAS[3]), "user-1"); // bloquea a user-1
+
+        assertThat(service.procesar(request(TARJETAS[4]), "user-2").status()).isEqualTo(PaymentStatus.APPROVED);
+        assertThat(userBlockService.bloqueadoHasta("user-2")).isEmpty();
     }
 }

@@ -13,9 +13,10 @@ import java.util.Deque;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Antifraude por VENTANA DESLIZANTE por tarjeta (cardHash).
+ * Antifraude por VENTANA DESLIZANTE. La clave es una tarjeta ("card:<hash>") o un usuario ("user:<oid>"):
+ * PaymentService registra cada intento en ambas, así cambiar de tarjeta no evita el conteo del usuario.
  *
- * Por cada tarjeta guardamos los instantes de sus intentos recientes. En cada intento nuevo:
+ * Por cada clave guardamos los instantes de sus intentos recientes. En cada intento nuevo:
  *  1) se descartan los intentos más viejos que la ventana (ej. 10 s),
  *  2) se agrega el intento actual (los bloqueados también cuentan),
  *  3) si la cantidad supera el máximo (ej. 3), el intento se bloquea.
@@ -30,7 +31,10 @@ public class FraudDetectionService {
     private final Clock clock;
     private final FraudProperties props;
 
-    /** cardHash -> instantes de los intentos dentro de la ventana (del más viejo al más nuevo) */
+    public static final String PREFIJO_TARJETA = "card:";
+    public static final String PREFIJO_USUARIO = "user:";
+
+    /** clave (tarjeta o usuario) -> instantes de los intentos dentro de la ventana (del más viejo al más nuevo) */
     private final ConcurrentHashMap<String, Deque<Instant>> intentosPorTarjeta = new ConcurrentHashMap<>();
 
     public FraudDetectionService(Clock clock, FraudProperties props) {
@@ -38,7 +42,15 @@ public class FraudDetectionService {
         this.props = props;
     }
 
-    /** Registra un intento de la tarjeta y dice si debe bloquearse */
+    public static String claveTarjeta(String cardHash) {
+        return PREFIJO_TARJETA + cardHash;
+    }
+
+    public static String claveUsuario(String userId) {
+        return PREFIJO_USUARIO + userId;
+    }
+
+    /** Registra un intento para la clave (tarjeta o usuario) y dice si supera el máximo */
     public FraudCheckResult registrarIntento(String cardHash) {
         Instant ahora = clock.instant();
         int[] cantidad = new int[1];
@@ -78,7 +90,12 @@ public class FraudDetectionService {
         }
     }
 
-    /** Cantidad de tarjetas en memoria (útil para tests y monitoreo) */
+    /** Borra los intentos de una clave (al desbloquear a un usuario se parte de cero) */
+    public void olvidar(String clave) {
+        intentosPorTarjeta.remove(clave);
+    }
+
+    /** Cantidad de claves en memoria (útil para tests y monitoreo) */
     public int tarjetasEnMemoria() {
         return intentosPorTarjeta.size();
     }

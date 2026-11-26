@@ -4,6 +4,7 @@ import cl.duoc.pedidos360.ms_pago.config.SecurityConfig;
 import cl.duoc.pedidos360.ms_pago.support.TokenDePrueba;
 import cl.duoc.pedidos360.ms_pago.security.JwtClaims;
 import cl.duoc.pedidos360.ms_pago.service.PaymentService;
+import cl.duoc.pedidos360.ms_pago.service.UserBlockService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
@@ -38,6 +39,9 @@ class PaymentControllerSecurityTest {
 
     @MockitoBean
     private PaymentService paymentService;
+
+    @MockitoBean
+    private UserBlockService userBlockService;
 
     /** Reemplaza el decoder de Azure (JWKS por internet) por uno con la llave local + mismos validadores */
     @TestBean

@@ -11,6 +11,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.time.Instant;
 import java.time.LocalDateTime;
 
 /** Alerta creada por cada intento bloqueado por posible fraude */
@@ -42,4 +43,7 @@ public class FraudAlert {
 
     @Column(nullable = false)
     private String motivo;
+
+    /** Hasta cuándo quedó bloqueado el usuario por esta alerta */
+    private Instant blockedUntil;
 }
